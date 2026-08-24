@@ -1,0 +1,31 @@
+{
+  "artifacts": {
+    "go.mod": {
+      "sha256": "3e8a68302b05a9417ffe36d88f8d65c574cac289964ab6b49d8115a7407a425b",
+      "size": 50
+    },
+    "potluckdb.go": {
+      "sha256": "457a5d49ee796d214ba9882334220b4819560b8452ce03b5937c89697f177ff7",
+      "size": 26554
+    },
+    "potluckdb_owners.go": {
+      "sha256": "ebb2f313c2fd4c22fce10c96b9f9c7eaac42d386af8ce41f96cbb25767fdeaa5",
+      "size": 30995
+    }
+  },
+  "entitlement": {
+    "activation_scope": "developer-or-team",
+    "deployment_scope": "registered-finished-applications",
+    "end_user_activation": false,
+    "format": "potluckdb-entitlement-v1",
+    "private_signing_key_embedded": false
+  },
+  "license": "proprietary",
+  "package_family": "go-module",
+  "product": "potluckdb",
+  "runtime_abi_version": 1,
+  "schema_version": 1,
+  "source_revision": "51b00d439bec95efebc8d0c062e8b868cd756e56",
+  "target_id": null,
+  "version": "0.1.0"
+}

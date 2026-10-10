@@ -1,16 +1,49 @@
 // Package potluckdb is the Go facade over the potluckdb Native Application
 // ABI: the canonical 22-intent API with validated policies, structured
-// errors, and finalizer-guarded owner lifecycle. Link the packaged
-// potluckdb_runtime_ffi library from the Universal C SDK.
+// errors, and finalizer-guarded owner lifecycle. The module carries the
+// static runtime library for every platform it supports, under
+// lib/<release target>/, so `go get` is the whole acquisition.
 package potluckdb
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/include -I${SRCDIR}/../../c-sdk/include -I${SRCDIR}/../../interface/include
+
+// Where the library is. One directory per release target, named by the
+// target id the release matrix uses, selected by the GOOS/GOARCH pair
+// `package_selectors.<target>.go_module_library` declares. A pair with no
+// directory here is a pair the module does not ship a library for and
+// cannot be built for: Linux against musl, because a build tag cannot
+// tell glibc from musl, and Windows on arm64, because cgo links through
+// gcc and that platform has no GNU target.
+#cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/lib/macos-arm64
+#cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/lib/macos-x86_64
+#cgo linux,amd64 LDFLAGS: -L${SRCDIR}/lib/linux-x86_64-gnu
+#cgo linux,arm64 LDFLAGS: -L${SRCDIR}/lib/linux-arm64-gnu
+#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/lib/windows-x86_64-gnu
+
+// The library itself, then what a static archive of it needs beside it.
+// Each line is what `rustc --print native-static-libs` prints for that
+// target, in the order and with the repetition it prints, because that
+// note says both can matter to a single-pass linker -- which the GNU and
+// MinGW-w64 linkers below are. Apple's is not: it resolves libraries
+// independently of order and warns on a repeat, so the two darwin lines
+// are the printed set with the repeats removed and with -lSystem
+// dropped, which the Go toolchain's own darwin link line already carries
+// and which is the library -lc and -lm resolve to there. A caller who
+// supplies a shared library of their own through CGO_LDFLAGS is
+// unaffected: the environment's flags precede these, so its -L directory
+// is searched first.
 #cgo LDFLAGS: -lpotluckdb_runtime_ffi
+#cgo darwin,arm64 LDFLAGS: -lc -lm -liconv
+#cgo darwin,amd64 LDFLAGS: -lc -lm
+#cgo linux,amd64 LDFLAGS: -ldl -lm -lpthread -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
+#cgo linux,arm64 LDFLAGS: -ldl -lm -lpthread -lc -lm -lrt -lpthread -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
+#cgo windows,amd64 LDFLAGS: -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp
 
 #include <stdlib.h>
 #include <string.h>
 #include "potluckdb.h"
+#include "potluckdb_bucket_bridge.h"
 */
 import "C"
 
@@ -37,11 +70,10 @@ const (
 
 // Error is the structured potluckdb application error.
 type Error struct {
-	Code       string
-	Category   ErrorCategory
-	Message    string
-	Action     string
-	RetryAfter *time.Duration
+	Code     string
+	Category ErrorCategory
+	Message  string
+	Action   string
 }
 
 func (e *Error) Error() string {
@@ -85,22 +117,28 @@ func check(result C.int32_t, cError *C.PotluckDbErrorV1) error {
 		C.potluckdb_error_release_v1(cError)
 		return nil
 	}
+	failure := errorValue(cError)
+	C.potluckdb_error_release_v1(cError)
+	return failure
+}
+
+// errorValue copies one ABI error; the caller still releases it.
+func errorValue(cError *C.PotluckDbErrorV1) *Error {
 	category := ErrorCategory(cError.category)
 	if category < CategoryCaller || category > CategoryInternal {
 		category = CategoryInternal
 	}
-	failure := &Error{
-		Code:     bufferString(cError.code),
+	code := bufferString(cError.code)
+	action := bufferString(cError.action)
+	if code == "analytical_engine_unavailable" {
+		action = "Download the platform DuckDB library from https://docs.potluckdb.com/install/go/#analytics and set OpenOptions.AnalyticalEngine to its path."
+	}
+	return &Error{
+		Code:     code,
 		Category: category,
 		Message:  bufferString(cError.message),
-		Action:   bufferString(cError.action),
+		Action:   action,
 	}
-	if cError.has_retry_after != 0 {
-		retry := time.Duration(cError.retry_after_ms) * time.Millisecond
-		failure.RetryAfter = &retry
-	}
-	C.potluckdb_error_release_v1(cError)
-	return failure
 }
 
 func withUtf8(value string, body func(C.PotluckDbSliceV1) error) error {
@@ -209,6 +247,32 @@ const (
 	Immediate TransactionMode = 2
 	Exclusive TransactionMode = 3
 )
+
+// QueryEngine selects the engine that answers a query.
+type QueryEngine string
+
+const (
+	EngineSQLite QueryEngine = "sqlite"
+	EngineDuckDB QueryEngine = "duckdb"
+)
+
+func unknownQueryEngine(engine QueryEngine) *Error {
+	return invalidArgument(
+		fmt.Sprintf("unknown query engine %q", engine),
+		"Use 'sqlite' or 'duckdb'.",
+	)
+}
+
+func queryEngineSelector(engine QueryEngine) (C.uint32_t, error) {
+	switch engine {
+	case EngineSQLite:
+		return C.POTLUCKDB_QUERY_SQLITE_V1, nil
+	case EngineDuckDB:
+		return C.POTLUCKDB_QUERY_DUCKDB_V1, nil
+	default:
+		return 0, unknownQueryEngine(engine)
+	}
+}
 
 // AutomaticSyncOptions tunes the shared automatic synchronization driver.
 type AutomaticSyncOptions struct {
@@ -351,7 +415,7 @@ func DisabledCheckpoint() *CheckpointPolicy {
 	return &CheckpointPolicy{}
 }
 
-// RetentionPolicy bounds retained revisions during collection.
+// RetentionPolicy selects bounded or unbounded revision retention.
 type RetentionPolicy struct {
 	keepLast  uint64
 	collectAt uint64
@@ -371,9 +435,20 @@ func BoundedRetention(keepLast, collectAt uint64) (*RetentionPolicy, error) {
 	return &RetentionPolicy{keepLast: keepLast, collectAt: collectAt}, nil
 }
 
+// UnboundedRetention keeps every revision until Collect runs with a bounded policy.
+func UnboundedRetention() *RetentionPolicy {
+	return &RetentionPolicy{}
+}
+
+// Bounded reports whether the policy bounds retained revisions.
+func (p *RetentionPolicy) Bounded() bool {
+	return p != nil && p.keepLast != 0
+}
+
 // ConnectionOptions tunes one connection.
 type ConnectionOptions struct {
-	Timeout     time.Duration
+	Timeout time.Duration
+	// MaximumRows defaults to 1_000_000.
 	MaximumRows uint64
 	Prefetch    *PrefetchPolicy
 	Checkpoint  *CheckpointPolicy
@@ -383,7 +458,7 @@ type ConnectionOptions struct {
 func DefaultConnectionOptions() *ConnectionOptions {
 	return &ConnectionOptions{
 		Timeout:     5 * time.Second,
-		MaximumRows: 100_000,
+		MaximumRows: 1_000_000,
 		Prefetch:    AutomaticPrefetch(),
 		Checkpoint:  AutomaticCheckpoint(),
 	}
@@ -393,7 +468,7 @@ func (o *ConnectionOptions) normalized() (*ConnectionOptions, error) {
 	if o == nil {
 		return DefaultConnectionOptions(), nil
 	}
-	if o.Timeout > 24*time.Hour || o.MaximumRows == 0 {
+	if o.Timeout < 0 || o.Timeout > 24*time.Hour || o.MaximumRows == 0 {
 		return nil, invalidArgument(
 			"connection timeout or result limit is outside the supported bounds",
 			"Use a timeout up to one day and a positive MaximumRows.",
@@ -412,6 +487,14 @@ func (o *ConnectionOptions) normalized() (*ConnectionOptions, error) {
 var clientIDShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
 // OpenOptions tunes one Database or Snapshot session.
+//
+// OnSync, when set, receives the outcome of every automatic synchronization
+// attempt of a Database: UpToDate, Pushed, Pulled, Conflict, or Failed
+// carrying the error. It is invoked on the synchronization thread, after
+// the attempt finished and before the next one starts; do not call the
+// database from inside it. Close returns after its last invocation, and no
+// invocation follows the close. A Snapshot never synchronizes, so it never
+// invokes the hook.
 type OpenOptions struct {
 	LocalBudgetBytes        uint64
 	MinimumLocalBudgetBytes uint64
@@ -419,7 +502,11 @@ type OpenOptions struct {
 	EncryptionKey           []byte
 	SyncPolicy              *SyncPolicy
 	ClientID                string
-	Connection              *ConnectionOptions
+	// LicenseKey supplies the license key described in contracts/licensing.md#requirements.
+	LicenseKey       string
+	AnalyticalEngine *string
+	Connection       *ConnectionOptions
+	OnSync           func(SyncResult)
 }
 
 // DefaultOpenOptions returns the canonical open settings.
@@ -477,12 +564,15 @@ func (o *OpenOptions) normalized() (*OpenOptions, error) {
 type RemoteOptions struct {
 	ReadConcurrency  uint32
 	WriteConcurrency uint32
-	Retention        *RetentionPolicy
+	// Retention is bounded by default: keep the newest ten revisions, collect once twenty exist.
+	// Nil selects the default bounded policy.
+	Retention *RetentionPolicy
 }
 
 // DefaultRemoteOptions returns the canonical remote settings.
 func DefaultRemoteOptions() *RemoteOptions {
-	return &RemoteOptions{ReadConcurrency: 32, WriteConcurrency: 16}
+	retention, _ := BoundedRetention(0, 0)
+	return &RemoteOptions{ReadConcurrency: 32, WriteConcurrency: 16, Retention: retention}
 }
 
 func (o *RemoteOptions) normalized() (*RemoteOptions, error) {
@@ -533,6 +623,21 @@ func Named(values map[string]any) Bindings {
 		entries[index] = bindingEntry{name: name, value: values[name]}
 	}
 	return Bindings{kind: 2, entries: entries}
+}
+
+// bindingsOf turns a statement's trailing arguments into its bindings:
+// nothing binds nothing, one Bindings value passes through unchanged
+// (which is how Named travels), and anything else is positional in order.
+func bindingsOf(args []any) Bindings {
+	if len(args) == 1 {
+		if bindings, ok := args[0].(Bindings); ok {
+			return bindings
+		}
+	}
+	if len(args) == 0 {
+		return noBindings()
+	}
+	return Positional(args...)
 }
 
 func noBindings() Bindings {
@@ -616,16 +721,80 @@ func buildBindings(
 	return body(&raw)
 }
 
-func copyRows(handle C.PotluckDbRowsHandleV1) ([][]any, error) {
+// Rows is a query result: the column names of the select list in order,
+// then one Row per result row.
+type Rows struct {
+	Columns []string
+	Rows    []Row
+}
+
+// Len returns the number of rows.
+func (r Rows) Len() int { return len(r.Rows) }
+
+// Row is one result row. Values holds the cells in select-list order and
+// Get reads a cell by column name; a name that appears twice answers its
+// last position.
+type Row struct {
+	Columns []string
+	Values  []any
+}
+
+// Len returns the number of cells.
+func (r Row) Len() int { return len(r.Values) }
+
+// Get returns the cell under the named column and whether the column exists.
+// At reads the value at a select-list position.
+func (r Row) At(index int) any { return r.Values[index] }
+
+// Get reads the value under a column name, or nil when the select list
+// has no such column; a name that appears twice answers its last
+// position. Lookup tells an absent column from a NULL.
+func (r Row) Get(column string) any {
+	value, _ := r.Lookup(column)
+	return value
+}
+
+// Lookup reads the value under a column name and reports whether the
+// select list has the column.
+func (r Row) Lookup(column string) (any, bool) {
+	for index := len(r.Columns) - 1; index >= 0; index-- {
+		if r.Columns[index] == column {
+			return r.Values[index], true
+		}
+	}
+	return nil, false
+}
+
+func copyRows(handle C.PotluckDbRowsHandleV1) (Rows, error) {
 	defer C.potluckdb_rows_release_v1(handle, nil)
 	cError := newError()
 	var rowCount C.uint64_t
 	if err := check(
 		C.potluckdb_rows_row_count_v1(handle, &rowCount, &cError), &cError,
 	); err != nil {
-		return nil, err
+		return Rows{}, err
 	}
-	rows := make([][]any, 0, int(rowCount))
+	var nameCount C.uint64_t
+	cError = newError()
+	if err := check(
+		C.potluckdb_rows_column_name_count_v1(handle, &nameCount, &cError),
+		&cError,
+	); err != nil {
+		return Rows{}, err
+	}
+	columns := make([]string, 0, int(nameCount))
+	for column := C.uint64_t(0); column < nameCount; column++ {
+		var name C.PotluckDbSliceV1
+		cError = newError()
+		if err := check(
+			C.potluckdb_rows_column_name_v1(handle, column, &name, &cError),
+			&cError,
+		); err != nil {
+			return Rows{}, err
+		}
+		columns = append(columns, string(sliceBytes(name)))
+	}
+	rows := make([]Row, 0, int(rowCount))
 	for row := C.uint64_t(0); row < rowCount; row++ {
 		cError = newError()
 		var columnCount C.uint64_t
@@ -633,7 +802,7 @@ func copyRows(handle C.PotluckDbRowsHandleV1) ([][]any, error) {
 			C.potluckdb_rows_column_count_v1(handle, row, &columnCount, &cError),
 			&cError,
 		); err != nil {
-			return nil, err
+			return Rows{}, err
 		}
 		values := make([]any, 0, int(columnCount))
 		for column := C.uint64_t(0); column < columnCount; column++ {
@@ -651,7 +820,7 @@ func copyRows(handle C.PotluckDbRowsHandleV1) ([][]any, error) {
 				),
 				&cError,
 			); err != nil {
-				return nil, err
+				return Rows{}, err
 			}
 			switch value.kind {
 			case 1:
@@ -667,14 +836,14 @@ func copyRows(handle C.PotluckDbRowsHandleV1) ([][]any, error) {
 			case 6:
 				values = append(values, sliceBytes(value.bytes))
 			default:
-				return nil, internalFailure(
+				return Rows{}, internalFailure(
 					"potluckdb returned an unknown SQL value kind",
 				)
 			}
 		}
-		rows = append(rows, values)
+		rows = append(rows, Row{Columns: columns, Values: values})
 	}
-	return rows, nil
+	return Rows{Columns: columns, Rows: rows}, nil
 }
 
 func copyStrings(handle C.PotluckDbStringListHandleV1) ([]string, error) {
@@ -705,7 +874,7 @@ type ExecuteResult struct {
 	LastInsertID *int64
 }
 
-// SyncResult is one of UpToDate, Pushed, Pulled, or Conflict.
+// SyncResult is one of UpToDate, Pushed, Pulled, Conflict, or Failed.
 type SyncResult interface {
 	syncResult()
 }
@@ -733,10 +902,18 @@ type Conflict struct {
 	Reason         string
 }
 
+// Failed reports an automatic attempt that failed, with the *Error the
+// attempt would have returned from Sync. Only OnSync delivers it: Sync
+// returns the error itself.
+type Failed struct {
+	Err error
+}
+
 func (UpToDate) syncResult() {}
 func (Pushed) syncResult()   {}
 func (Pulled) syncResult()   {}
 func (Conflict) syncResult() {}
+func (Failed) syncResult()   {}
 
 // ConflictResolution reports the outcome of resolving a conflict.
 type ConflictResolution struct {
@@ -903,6 +1080,10 @@ type handleState struct {
 	closable bool
 	closed   bool
 	retained any
+	// afterClose runs only after a successful close or release. A storage-library adapter is given
+	// back here: the runtime keeps the table's context for the life of
+	// the exchange, so the adapter must not go back before close.
+	afterClose func()
 }
 
 func newHandleState(
@@ -936,6 +1117,9 @@ func (s *handleState) withHandle(body func(C.uint64_t) error) error {
 }
 
 func (s *handleState) close(call func(C.uint64_t) error) error {
+	if C.potluckdb_go_in_bucket_callback() != 0 {
+		return &Error{Code: "invalid_state", Category: CategoryCaller, Message: "recursive close from a storage callback is refused", Action: "Close the owner after the callback returns."}
+	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if s.handle == 0 || s.closed {
@@ -945,7 +1129,18 @@ func (s *handleState) close(call func(C.uint64_t) error) error {
 		return err
 	}
 	s.closed = true
+	forgetOrphanHandleState(s)
+	s.runAfterCloseLocked()
 	return nil
+}
+
+func (s *handleState) runAfterCloseLocked() {
+	if s.afterClose == nil {
+		return
+	}
+	fn := s.afterClose
+	s.afterClose = nil
+	fn()
 }
 
 func (s *handleState) release(call func(C.uint64_t) error) error {
@@ -954,46 +1149,97 @@ func (s *handleState) release(call func(C.uint64_t) error) error {
 	if s.handle == 0 {
 		return nil
 	}
-	if err := call(s.handle); err != nil {
+	err := call(s.handle)
+	if err != nil && s.owner != ownerTransaction {
 		return err
 	}
 	s.handle = 0
+	forgetOrphanHandleState(s)
+	s.retained = nil
+	s.runAfterCloseLocked()
 	runtime.SetFinalizer(s, nil)
-	return nil
+	return err
 }
 
 func (s *handleState) cleanup() {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	if s.handle == 0 {
+	if C.potluckdb_go_in_bucket_callback() != 0 {
+		orphanHandleState(s)
 		return
 	}
-	needsClose := s.closable && !s.closed
-	switch s.owner {
-	case ownerRemote:
-		if needsClose {
-			C.potluckdb_remote_close_v1(s.handle, nil)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.handle != 0 {
+		needsClose := s.closable && !s.closed
+		switch s.owner {
+		case ownerRemote:
+			if needsClose {
+				if C.potluckdb_remote_close_v1(s.handle, nil) != C.POTLUCKDB_APPLICATION_OK_V1 {
+					orphanHandleState(s)
+					return
+				}
+			}
+			if C.potluckdb_remote_release_v1(s.handle, nil) != C.POTLUCKDB_APPLICATION_OK_V1 {
+				orphanHandleState(s)
+				return
+			}
+		case ownerDatabase:
+			if needsClose {
+				if C.potluckdb_database_close_v1(s.handle, nil) != C.POTLUCKDB_APPLICATION_OK_V1 {
+					orphanHandleState(s)
+					return
+				}
+			}
+			if C.potluckdb_database_release_v1(s.handle, nil) != C.POTLUCKDB_APPLICATION_OK_V1 {
+				orphanHandleState(s)
+				return
+			}
+		case ownerConnection:
+			if needsClose {
+				if C.potluckdb_connection_close_v1(s.handle, nil) != C.POTLUCKDB_APPLICATION_OK_V1 {
+					orphanHandleState(s)
+					return
+				}
+			}
+			if C.potluckdb_connection_release_v1(s.handle, nil) != C.POTLUCKDB_APPLICATION_OK_V1 {
+				orphanHandleState(s)
+				return
+			}
+		case ownerSnapshot:
+			if needsClose {
+				if C.potluckdb_snapshot_close_v1(s.handle, nil) != C.POTLUCKDB_APPLICATION_OK_V1 {
+					orphanHandleState(s)
+					return
+				}
+			}
+			if C.potluckdb_snapshot_release_v1(s.handle, nil) != C.POTLUCKDB_APPLICATION_OK_V1 {
+				orphanHandleState(s)
+				return
+			}
+		default:
+			C.potluckdb_transaction_release_v1(s.handle, nil)
 		}
-		C.potluckdb_remote_release_v1(s.handle, nil)
-	case ownerDatabase:
-		if needsClose {
-			C.potluckdb_database_close_v1(s.handle, nil)
-		}
-		C.potluckdb_database_release_v1(s.handle, nil)
-	case ownerConnection:
-		if needsClose {
-			C.potluckdb_connection_close_v1(s.handle, nil)
-		}
-		C.potluckdb_connection_release_v1(s.handle, nil)
-	case ownerSnapshot:
-		if needsClose {
-			C.potluckdb_snapshot_close_v1(s.handle, nil)
-		}
-		C.potluckdb_snapshot_release_v1(s.handle, nil)
-	default:
-		C.potluckdb_transaction_release_v1(s.handle, nil)
+		s.handle = 0
 	}
-	s.handle = 0
+	forgetOrphanHandleState(s)
+	s.runAfterCloseLocked()
+}
+
+// A refused finalizer leaves native registrations borrowing these owners.
+var orphanedHandleStates = struct {
+	sync.Mutex
+	owners map[*handleState]struct{}
+}{owners: make(map[*handleState]struct{})}
+
+func orphanHandleState(s *handleState) {
+	orphanedHandleStates.Lock()
+	orphanedHandleStates.owners[s] = struct{}{}
+	orphanedHandleStates.Unlock()
+}
+
+func forgetOrphanHandleState(s *handleState) {
+	orphanedHandleStates.Lock()
+	delete(orphanedHandleStates.owners, s)
+	orphanedHandleStates.Unlock()
 }
 
 var pairTieLock sync.Mutex

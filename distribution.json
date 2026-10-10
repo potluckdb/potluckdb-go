@@ -4,28 +4,89 @@
       "sha256": "3e8a68302b05a9417ffe36d88f8d65c574cac289964ab6b49d8115a7407a425b",
       "size": 50
     },
+    "lib/linux-arm64-gnu/libpotluckdb_runtime_ffi.a": {
+      "sha256": "f009b52dfb7d3439ad776815d551e99b0c80ce268cd99014ff7aa447de0a8fae",
+      "size": 39496278
+    },
+    "lib/linux-x86_64-gnu/libpotluckdb_runtime_ffi.a": {
+      "sha256": "7db4cb0880ed0a7857e6887c202a6374c947e9068ef0c0eecad5c6ae7079370e",
+      "size": 38822210
+    },
+    "lib/macos-arm64/libpotluckdb_runtime_ffi.a": {
+      "sha256": "296d1535c9764a4fa66571e13e001edbe2e0fa0d3e2039d43f47def4d00d4060",
+      "size": 29237560
+    },
+    "lib/macos-x86_64/libpotluckdb_runtime_ffi.a": {
+      "sha256": "3dcc187a278352d474ffd52b1359b2234244a7e3dd8e8291def6291daf1c50a1",
+      "size": 29789496
+    },
+    "lib/windows-x86_64-gnu/libpotluckdb_runtime_ffi.a": {
+      "sha256": "b8c549fbcb2445c883e8c406057e0bd409f8523230d5bee90f2dfbb13764deb8",
+      "size": 27401406
+    },
     "potluckdb.go": {
-      "sha256": "457a5d49ee796d214ba9882334220b4819560b8452ce03b5937c89697f177ff7",
-      "size": 26554
+      "sha256": "573191e9dd45f8d12fffdb64decb81daaf8e47a3500281cc026dd34752854270",
+      "size": 35270
+    },
+    "potluckdb_bucket.go": {
+      "sha256": "c40989fbaee2128a2a7074930831087de8ea7afc8a4dd228d079523cc7e2e314",
+      "size": 24613
+    },
+    "potluckdb_bucket_bridge.c": {
+      "sha256": "086237d1c43202de79777d29ee81822b0a8b6d7b17dcb61cbca7930a1bebd5d1",
+      "size": 5561
+    },
+    "potluckdb_bucket_bridge.h": {
+      "sha256": "e301fe621fc1764a90d66097e2b904b0760c13572af69ee62534b216f89e27ff",
+      "size": 1932
     },
     "potluckdb_owners.go": {
-      "sha256": "ebb2f313c2fd4c22fce10c96b9f9c7eaac42d386af8ce41f96cbb25767fdeaa5",
-      "size": 30995
+      "sha256": "e7aa778dc4602beb681e582b85cea920d33f3e54511bf6a1f13760c4e119293f",
+      "size": 36845
+    },
+    "potluckdb_storage.c": {
+      "sha256": "b3cc92e4d7e2aaacc8a6be9d76280f31db9bb2671f4b31414ea2dd1e4f5be6b8",
+      "size": 7559
+    },
+    "potluckdb_storage.go": {
+      "sha256": "d557ee399b826f5d516c140e3cea1136010319dded91a4249bff76e95876b0f2",
+      "size": 14229
+    },
+    "potluckdb_storage.h": {
+      "sha256": "e5e6074fbf08afa13b73072e71d057afff3421c1ab99a87ef99c026f0efcff94",
+      "size": 2236
+    },
+    "potluckdb_sync_hook.go": {
+      "sha256": "6e9541657ae26ccce4e4946f153dd58f3f2685cc36d4566e8cdc058f1c8e5158",
+      "size": 2111
+    },
+    "potluckdb_sync_hook_bridge.c": {
+      "sha256": "7878d9684b1180669f64805cdb7d20f1967a4b09bfe1c24a3e116d77e8133413",
+      "size": 781
+    },
+    "potluckdb_sync_hook_bridge.h": {
+      "sha256": "295b85b23fd08fc48ec5e0a63fe92eb1a951599d119bc4a7f50064533c728149",
+      "size": 1509
+    },
+    "s3/s3.go": {
+      "sha256": "ea2c6b319c52ea8e15cc4c05f1df2f88c0029b3e0985d93475b3739bb710a651",
+      "size": 43555
     }
   },
-  "entitlement": {
-    "activation_scope": "developer-or-team",
-    "deployment_scope": "registered-finished-applications",
-    "end_user_activation": false,
-    "format": "potluckdb-entitlement-v1",
+  "license": "proprietary",
+  "licensing": {
+    "deployment_scope": "finished-applications",
+    "format": "potluckdb-license-key",
+    "format_version": 1,
+    "key_scope": "developer-seat",
+    "network_activation": false,
     "private_signing_key_embedded": false
   },
-  "license": "proprietary",
   "package_family": "go-module",
   "product": "potluckdb",
   "runtime_abi_version": 1,
   "schema_version": 1,
-  "source_revision": "51b00d439bec95efebc8d0c062e8b868cd756e56",
+  "source_revision": "3073b33aaabe0059a9a74ec718067e821f7f49e3",
   "target_id": null,
   "version": "0.1.0"
 }

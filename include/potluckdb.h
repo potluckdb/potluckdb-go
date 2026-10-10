@@ -44,6 +44,10 @@ extern "C" {
 #define POTLUCKDB_TRANSACTION_DEFERRED_V1 UINT32_C(1)
 #define POTLUCKDB_TRANSACTION_IMMEDIATE_V1 UINT32_C(2)
 #define POTLUCKDB_TRANSACTION_EXCLUSIVE_V1 UINT32_C(3)
+#define POTLUCKDB_STATEMENT_QUERY_V1 UINT32_C(1)
+#define POTLUCKDB_STATEMENT_EXECUTE_V1 UINT32_C(2)
+#define POTLUCKDB_BINDING_METADATA_EXACT_V1 UINT32_C(1)
+#define POTLUCKDB_BINDING_METADATA_DEFERRED_V1 UINT32_C(2)
 
 #define POTLUCKDB_BINDINGS_POSITIONAL_V1 UINT32_C(1)
 #define POTLUCKDB_BINDINGS_NAMED_V1 UINT32_C(2)
@@ -58,6 +62,7 @@ extern "C" {
 #define POTLUCKDB_SYNC_PUSHED_V1 UINT32_C(2)
 #define POTLUCKDB_SYNC_PULLED_V1 UINT32_C(3)
 #define POTLUCKDB_SYNC_CONFLICT_V1 UINT32_C(4)
+#define POTLUCKDB_SYNC_FAILED_V1 UINT32_C(5)
 
 #define POTLUCKDB_SYNC_STATE_MANUAL_V1 UINT32_C(1)
 #define POTLUCKDB_SYNC_STATE_UNBOUND_V1 UINT32_C(2)
@@ -71,6 +76,10 @@ extern "C" {
 
 #define POTLUCKDB_OPEN_ENCRYPTION_KEY_V1 UINT32_C(1)
 #define POTLUCKDB_OPEN_CLIENT_ID_V1 UINT32_C(2)
+#define POTLUCKDB_OPEN_LICENSE_KEY_V1 UINT32_C(4)
+#define POTLUCKDB_OPEN_ANALYTICAL_ENGINE_V1 UINT32_C(8)
+#define POTLUCKDB_QUERY_SQLITE_V1 UINT32_C(0)
+#define POTLUCKDB_QUERY_DUCKDB_V1 UINT32_C(1)
 #define POTLUCKDB_REMOTE_RETENTION_V1 UINT32_C(1)
 #define POTLUCKDB_REENCRYPT_SOURCE_KEY_V1 UINT32_C(1)
 #define POTLUCKDB_REENCRYPT_REVISION_V1 UINT32_C(2)
@@ -93,8 +102,8 @@ typedef struct PotluckDbErrorV1 {
     uint32_t struct_size;
     uint32_t abi_version;
     uint32_t category;
-    uint32_t has_retry_after;
-    uint64_t retry_after_ms;
+    uint32_t reserved;
+    uint64_t reserved64;
     PotluckDbBufferV1 code;
     PotluckDbBufferV1 message;
     PotluckDbBufferV1 action;
@@ -123,6 +132,40 @@ typedef struct PotluckDbConnectionOptionsV1 {
     uint64_t checkpoint_forced_limit_bytes;
 } PotluckDbConnectionOptionsV1;
 
+/*
+ * Outcome of one synchronization attempt. `error` carries the error of a
+ * failed automatic attempt (kind POTLUCKDB_SYNC_FAILED_V1) and is inert for
+ * every other kind; potluckdb_database_sync_v1 never returns that kind and
+ * reports a failed attempt through its error output.
+ */
+typedef struct PotluckDbSyncResultV1 {
+    uint32_t struct_size;
+    uint32_t kind;
+    uint32_t has_revision;
+    uint32_t reserved;
+    PotluckDbRevisionV1 revision;
+    PotluckDbStringListHandleV1 replayed;
+    PotluckDbStringListHandleV1 quarantined;
+    PotluckDbBufferV1 reason;
+    PotluckDbErrorV1 error;
+} PotluckDbSyncResultV1;
+
+/*
+ * Hook receiving the outcome of every automatic synchronization attempt, on
+ * the driver's thread. The outcome belongs to the hook: release it with
+ * potluckdb_sync_result_release_v1. The context stays caller-owned and must
+ * live until the database has closed; no invocation follows the close.
+ */
+typedef void (*PotluckDbOnSyncV1)(void *context, PotluckDbSyncResultV1 outcome);
+
+/*
+ * `on_sync` and `on_sync_context` sit behind the layout before them, and
+ * `license_key` behind those: a struct_size of an earlier layout is
+ * accepted and leaves the members behind it unset. `license_key` is the
+ * text of the license_key open option, read when
+ * POTLUCKDB_OPEN_LICENSE_KEY_V1 is set. The following analytical_engine
+ * slice is copied when POTLUCKDB_OPEN_ANALYTICAL_ENGINE_V1 is set (I7).
+ */
 typedef struct PotluckDbOpenOptionsV1 {
     uint32_t struct_size;
     uint32_t flags;
@@ -133,6 +176,10 @@ typedef struct PotluckDbOpenOptionsV1 {
     PotluckDbSliceV1 client_id;
     PotluckDbSyncPolicyV1 sync_policy;
     PotluckDbConnectionOptionsV1 connection;
+    PotluckDbOnSyncV1 on_sync;
+    void *on_sync_context;
+    PotluckDbSliceV1 license_key;
+    PotluckDbSliceV1 analytical_engine;
 } PotluckDbOpenOptionsV1;
 
 typedef struct PotluckDbRetentionPolicyV1 {
@@ -181,6 +228,14 @@ typedef struct PotluckDbExecuteResultV1 {
     int64_t last_insert_id;
 } PotluckDbExecuteResultV1;
 
+/* I4: parameter_count is authoritative only with EXACT binding metadata. */
+typedef struct PotluckDbStatementAdmissionV1 {
+    uint32_t struct_size;
+    uint32_t kind;
+    uint32_t binding_metadata;
+    uint32_t parameter_count;
+} PotluckDbStatementAdmissionV1;
+
 typedef struct PotluckDbDatabaseStatusV1 {
     uint32_t struct_size;
     uint32_t has_revision;
@@ -223,17 +278,6 @@ typedef struct PotluckDbRemoteStatusV1 {
     uint64_t retained_revisions;
     uint64_t policy_failures;
 } PotluckDbRemoteStatusV1;
-
-typedef struct PotluckDbSyncResultV1 {
-    uint32_t struct_size;
-    uint32_t kind;
-    uint32_t has_revision;
-    uint32_t reserved;
-    PotluckDbRevisionV1 revision;
-    PotluckDbStringListHandleV1 replayed;
-    PotluckDbStringListHandleV1 quarantined;
-    PotluckDbBufferV1 reason;
-} PotluckDbSyncResultV1;
 
 typedef struct PotluckDbConflictResolutionV1 {
     uint32_t struct_size;
@@ -295,6 +339,7 @@ uint32_t potluckdb_value_size_v1(void);
 uint32_t potluckdb_binding_size_v1(void);
 uint32_t potluckdb_bindings_size_v1(void);
 uint32_t potluckdb_execute_result_size_v1(void);
+uint32_t potluckdb_statement_admission_size_v1(void);
 uint32_t potluckdb_database_status_size_v1(void);
 uint32_t potluckdb_connection_status_size_v1(void);
 uint32_t potluckdb_snapshot_status_size_v1(void);
@@ -316,6 +361,7 @@ void potluckdb_value_init_v1(PotluckDbValueV1 *value);
 void potluckdb_binding_init_v1(PotluckDbBindingV1 *value);
 void potluckdb_bindings_init_v1(PotluckDbBindingsV1 *value);
 void potluckdb_execute_result_init_v1(PotluckDbExecuteResultV1 *value);
+void potluckdb_statement_admission_init_v1(PotluckDbStatementAdmissionV1 *value);
 void potluckdb_database_status_init_v1(PotluckDbDatabaseStatusV1 *value);
 void potluckdb_connection_status_init_v1(PotluckDbConnectionStatusV1 *value);
 void potluckdb_snapshot_status_init_v1(PotluckDbSnapshotStatusV1 *value);
@@ -345,6 +391,7 @@ int32_t potluckdb_open_v1(PotluckDbSliceV1 path, PotluckDbRemoteHandleV1 remote,
 int32_t potluckdb_open_revision_v1(PotluckDbSliceV1 path, const PotluckDbRevisionV1 *revision, PotluckDbRemoteHandleV1 remote, const PotluckDbOpenOptionsV1 *options, PotluckDbSnapshotHandleV1 *out_snapshot, PotluckDbErrorV1 *out_error);
 
 int32_t potluckdb_database_query_v1(PotluckDbDatabaseHandleV1 database, PotluckDbSliceV1 sql, const PotluckDbBindingsV1 *bindings, PotluckDbRowsHandleV1 *out_rows, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_database_query_with_engine_v1(PotluckDbDatabaseHandleV1 database, PotluckDbSliceV1 sql, const PotluckDbBindingsV1 *bindings, uint32_t engine, PotluckDbRowsHandleV1 *out_rows, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_database_execute_v1(PotluckDbDatabaseHandleV1 database, PotluckDbSliceV1 sql, const PotluckDbBindingsV1 *bindings, PotluckDbExecuteResultV1 *out_result, uint32_t out_result_size, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_database_transaction_begin_v1(PotluckDbDatabaseHandleV1 database, uint32_t mode, PotluckDbTransactionHandleV1 *out_transaction, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_database_connect_v1(PotluckDbDatabaseHandleV1 database, const PotluckDbConnectionOptionsV1 *options, PotluckDbConnectionHandleV1 *out_connection, PotluckDbErrorV1 *out_error);
@@ -357,6 +404,7 @@ int32_t potluckdb_database_close_v1(PotluckDbDatabaseHandleV1 database, PotluckD
 int32_t potluckdb_database_release_v1(PotluckDbDatabaseHandleV1 database, PotluckDbErrorV1 *out_error);
 
 int32_t potluckdb_connection_query_v1(PotluckDbConnectionHandleV1 connection, PotluckDbSliceV1 sql, const PotluckDbBindingsV1 *bindings, PotluckDbRowsHandleV1 *out_rows, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_connection_query_with_engine_v1(PotluckDbConnectionHandleV1 connection, PotluckDbSliceV1 sql, const PotluckDbBindingsV1 *bindings, uint32_t engine, PotluckDbRowsHandleV1 *out_rows, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_connection_execute_v1(PotluckDbConnectionHandleV1 connection, PotluckDbSliceV1 sql, const PotluckDbBindingsV1 *bindings, PotluckDbExecuteResultV1 *out_result, uint32_t out_result_size, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_connection_transaction_begin_v1(PotluckDbConnectionHandleV1 connection, uint32_t mode, PotluckDbTransactionHandleV1 *out_transaction, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_connection_checkpoint_v1(PotluckDbConnectionHandleV1 connection, PotluckDbCheckpointResultV1 *out_result, uint32_t out_result_size, PotluckDbErrorV1 *out_error);
@@ -365,18 +413,36 @@ int32_t potluckdb_connection_close_v1(PotluckDbConnectionHandleV1 connection, Po
 int32_t potluckdb_connection_release_v1(PotluckDbConnectionHandleV1 connection, PotluckDbErrorV1 *out_error);
 
 int32_t potluckdb_snapshot_query_v1(PotluckDbSnapshotHandleV1 snapshot, PotluckDbSliceV1 sql, const PotluckDbBindingsV1 *bindings, PotluckDbRowsHandleV1 *out_rows, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_snapshot_query_with_engine_v1(PotluckDbSnapshotHandleV1 snapshot, PotluckDbSliceV1 sql, const PotluckDbBindingsV1 *bindings, uint32_t engine, PotluckDbRowsHandleV1 *out_rows, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_snapshot_status_v1(PotluckDbSnapshotHandleV1 snapshot, PotluckDbSnapshotStatusV1 *out_status, uint32_t out_status_size, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_snapshot_close_v1(PotluckDbSnapshotHandleV1 snapshot, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_snapshot_release_v1(PotluckDbSnapshotHandleV1 snapshot, PotluckDbErrorV1 *out_error);
 
 int32_t potluckdb_transaction_query_v1(PotluckDbTransactionHandleV1 transaction, PotluckDbSliceV1 sql, const PotluckDbBindingsV1 *bindings, PotluckDbRowsHandleV1 *out_rows, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_transaction_query_with_engine_v1(PotluckDbTransactionHandleV1 transaction, PotluckDbSliceV1 sql, const PotluckDbBindingsV1 *bindings, uint32_t engine, PotluckDbRowsHandleV1 *out_rows, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_transaction_execute_v1(PotluckDbTransactionHandleV1 transaction, PotluckDbSliceV1 sql, const PotluckDbBindingsV1 *bindings, PotluckDbExecuteResultV1 *out_result, uint32_t out_result_size, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_transaction_commit_v1(PotluckDbTransactionHandleV1 transaction, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_transaction_rollback_v1(PotluckDbTransactionHandleV1 transaction, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_transaction_release_v1(PotluckDbTransactionHandleV1 transaction, PotluckDbErrorV1 *out_error);
 
+/* Integrator metadata. Preparation follows A2 on the same SQLite owner. */
+int32_t potluckdb_database_statement_kind_v1(PotluckDbDatabaseHandleV1 database, PotluckDbSliceV1 sql, uint32_t *out_kind, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_connection_statement_kind_v1(PotluckDbConnectionHandleV1 connection, PotluckDbSliceV1 sql, uint32_t *out_kind, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_transaction_statement_kind_v1(PotluckDbTransactionHandleV1 transaction, PotluckDbSliceV1 sql, uint32_t *out_kind, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_database_statement_info_v1(PotluckDbDatabaseHandleV1 database, PotluckDbSliceV1 sql, uint32_t *out_kind, uint32_t *out_parameter_count, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_database_statement_metadata_v1(PotluckDbDatabaseHandleV1 database, PotluckDbSliceV1 sql, uint32_t *out_kind, uint32_t *out_parameter_count, PotluckDbRowsHandleV1 *out_columns, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_connection_statement_info_v1(PotluckDbConnectionHandleV1 connection, PotluckDbSliceV1 sql, uint32_t *out_kind, uint32_t *out_parameter_count, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_connection_statement_metadata_v1(PotluckDbConnectionHandleV1 connection, PotluckDbSliceV1 sql, uint32_t *out_kind, uint32_t *out_parameter_count, PotluckDbRowsHandleV1 *out_columns, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_transaction_statement_info_v1(PotluckDbTransactionHandleV1 transaction, PotluckDbSliceV1 sql, uint32_t *out_kind, uint32_t *out_parameter_count, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_transaction_statement_metadata_v1(PotluckDbTransactionHandleV1 transaction, PotluckDbSliceV1 sql, uint32_t *out_kind, uint32_t *out_parameter_count, PotluckDbRowsHandleV1 *out_columns, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_connection_statement_admission_v1(PotluckDbConnectionHandleV1 connection, PotluckDbSliceV1 sql, PotluckDbStatementAdmissionV1 *out_result, uint32_t out_result_size, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_transaction_statement_admission_v1(PotluckDbTransactionHandleV1 transaction, PotluckDbSliceV1 sql, PotluckDbStatementAdmissionV1 *out_result, uint32_t out_result_size, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_transaction_state_v1(PotluckDbTransactionHandleV1 transaction, uint32_t *out_active, PotluckDbErrorV1 *out_error);
+
 int32_t potluckdb_rows_row_count_v1(PotluckDbRowsHandleV1 rows, uint64_t *out_count, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_rows_column_count_v1(PotluckDbRowsHandleV1 rows, uint64_t row, uint64_t *out_count, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_rows_column_name_count_v1(PotluckDbRowsHandleV1 rows, uint64_t *out_count, PotluckDbErrorV1 *out_error);
+int32_t potluckdb_rows_column_name_v1(PotluckDbRowsHandleV1 rows, uint64_t column, PotluckDbSliceV1 *out_name, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_rows_value_v1(PotluckDbRowsHandleV1 rows, uint64_t row, uint64_t column, PotluckDbValueV1 *out_value, uint32_t out_value_size, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_rows_release_v1(PotluckDbRowsHandleV1 rows, PotluckDbErrorV1 *out_error);
 int32_t potluckdb_string_list_count_v1(PotluckDbStringListHandleV1 list, uint64_t *out_count, PotluckDbErrorV1 *out_error);
@@ -413,6 +479,23 @@ void potluckdb_auto_sync_driver_status_init_v1(
 /* Start one host timer/worker for one open, remote-bound automatic session. */
 int32_t potluckdb_auto_sync_driver_start_v1(
     PotluckDbRuntimeHandleV1 session_handle,
+    PotluckDbAutoSyncDriverHandleV1 *out_driver,
+    PotluckDbRuntimeErrorV1 *out_error
+);
+/* Receives the status of every drive that completed an attempt, on the
+ * driver's worker thread; deferred attempts are not reported. The observer
+ * owns the status' buffers and releases them. */
+typedef void (*PotluckDbAutoSyncObserverV1)(
+    void *context,
+    PotluckDbRuntimeAutoSyncStatusV1 *status
+);
+/* Start a driver that reports every completed attempt to `observer` with
+ * `context`, which the driver passes through and never owns. A NULL observer
+ * starts the plain driver. Stop returns after the observer's last call. */
+int32_t potluckdb_auto_sync_driver_start_observed_v1(
+    PotluckDbRuntimeHandleV1 session_handle,
+    PotluckDbAutoSyncObserverV1 observer,
+    void *context,
     PotluckDbAutoSyncDriverHandleV1 *out_driver,
     PotluckDbRuntimeErrorV1 *out_error
 );

@@ -47,12 +47,18 @@ func RemoteFromDirectory(path string, options *RemoteOptions) (*Remote, error) {
 // StorageAdapter is the low-level escape hatch: it wraps a caller-owned
 // native PotluckDbRuntimeBucketAdapterV1 whose callbacks and context must
 // stay valid until the borrowing Remote is closed.
+//
+// Integrator API: for code that supplies its own storage transport. Application
+// code reaches a bucket through FromS3, FromGCS and FromAzure.
 type StorageAdapter struct {
 	pointer unsafe.Pointer
 	owner   any
 }
 
 // RetainStorageAdapter keeps owner reachable for the adapter's lifetime.
+//
+// Integrator API: for code that supplies its own storage transport. Application
+// code reaches a bucket through FromS3, FromGCS and FromAzure.
 func RetainStorageAdapter(pointer unsafe.Pointer, owner any) (*StorageAdapter, error) {
 	if pointer == nil {
 		return nil, invalidArgument(
@@ -64,15 +70,26 @@ func RetainStorageAdapter(pointer unsafe.Pointer, owner any) (*StorageAdapter, e
 }
 
 // BorrowedStorageAdapter trusts the caller to outlive the Remote.
+//
+// Integrator API: for code that supplies its own storage transport. Application
+// code reaches a bucket through FromS3, FromGCS and FromAzure.
 func BorrowedStorageAdapter(pointer unsafe.Pointer) (*StorageAdapter, error) {
 	return RetainStorageAdapter(pointer, nil)
 }
 
 // RemoteFromStorage opens a callback-backed Remote; nil options select the
 // defaults.
+//
+// Integrator API: for code that supplies its own storage transport. Application
+// code reaches a bucket through FromS3, FromGCS and FromAzure.
 func RemoteFromStorage(
 	storage *StorageAdapter, options *RemoteOptions,
 ) (*Remote, error) {
+	if storage == nil {
+		return nil, invalidArgument(
+			"storage must not be nil", "Supply a storage adapter and retry.",
+		)
+	}
 	selected, err := options.normalized()
 	if err != nil {
 		return nil, err
@@ -103,11 +120,16 @@ func buildRemoteOptions(options *RemoteOptions) C.PotluckDbRemoteOptionsV1 {
 	C.potluckdb_remote_options_init_v1(&raw)
 	raw.read_concurrency = C.uint32_t(options.ReadConcurrency)
 	raw.write_concurrency = C.uint32_t(options.WriteConcurrency)
-	if options.Retention != nil {
+	retention := options.Retention
+	if retention == nil {
+		retention = DefaultRemoteOptions().Retention
+	}
+	raw.flags &^= 1
+	if retention.Bounded() {
 		raw.flags |= 1
 		C.potluckdb_retention_policy_init_v1(&raw.retention)
-		raw.retention.keep_last = C.uint64_t(options.Retention.keepLast)
-		raw.retention.collect_at = C.uint64_t(options.Retention.collectAt)
+		raw.retention.keep_last = C.uint64_t(retention.keepLast)
+		raw.retention.collect_at = C.uint64_t(retention.collectAt)
 	}
 	return raw
 }
@@ -141,15 +163,20 @@ func (r *Remote) Status() (*RemoteStatus, error) {
 	return status, err
 }
 
-// Collect runs one bounded retention collection; nil selects the defaults.
+// Collect runs one collection under an explicit bounded retention policy.
 func (r *Remote) Collect(retention *RetentionPolicy) (*CollectionReport, error) {
+	if retention == nil {
+		return nil, invalidArgument(
+			"collect needs an explicit retention policy",
+			"Pass BoundedRetention(keepLast, collectAt).",
+		)
+	}
 	selected := retention
-	if selected == nil {
-		bounded, err := BoundedRetention(0, 0)
-		if err != nil {
-			return nil, err
-		}
-		selected = bounded
+	if !selected.Bounded() {
+		return nil, invalidArgument(
+			"collect needs a bounded retention policy",
+			"Pass BoundedRetention(keepLast, collectAt).",
+		)
 	}
 	var report *CollectionReport
 	err := r.state.withHandle(func(handle C.uint64_t) error {
@@ -224,37 +251,78 @@ type Transaction struct {
 	state *handleState
 }
 
+func nilTransactionBody() error {
+	return invalidArgument(
+		"transaction body must not be nil", "Supply a body and retry.",
+	)
+}
+
+// unopenedRemote refuses a Remote value this package did not open, such as
+// &Remote{}, whose missing state would otherwise panic.
+func unopenedRemote() error {
+	return invalidArgument(
+		"remote was not opened by this package",
+		"Open the remote with RemoteFromDirectory, FromS3, FromGCS, FromAzure or RemoteFromStorage and retry.",
+	)
+}
+
 func runTransaction(
 	handle C.uint64_t, owner *handleState, body func(*Transaction) error,
-) error {
+) (err error) {
 	state, err := newHandleState(ownerTransaction, handle, false, owner)
 	if err != nil {
 		return err
 	}
 	transaction := &Transaction{state: state}
+	completed := false
+	defer func() {
+		if !completed {
+			transaction.rollbackQuietly()
+		}
+		// A panic unwinds through here, and so does Goexit, for
+		// which recover reports nothing: the completed flag is
+		// what rolls that path back.
+		if panicked := recover(); panicked != nil {
+			panic(panicked)
+		}
+	}()
 	if err := body(transaction); err != nil {
+		completed = true
 		transaction.rollbackQuietly()
 		return err
 	}
-	return transaction.commit()
+	err = transaction.commit()
+	completed = true
+	return err
 }
 
 // Query reads rows inside the transaction.
-func (t *Transaction) Query(sql string, bindings Bindings) ([][]any, error) {
-	return runQuery(t.state, sql, bindings, func(
+func (t *Transaction) Query(sql string, args ...any) (Rows, error) {
+	return t.QueryWith(EngineSQLite, sql, args...)
+}
+
+// QueryWith reads rows inside the transaction on the given engine.
+func (t *Transaction) QueryWith(
+	engine QueryEngine, sql string, args ...any,
+) (Rows, error) {
+	selector, err := queryEngineSelector(engine)
+	if err != nil {
+		return Rows{}, err
+	}
+	return runQuery(t.state, sql, bindingsOf(args), func(
 		handle C.uint64_t,
 		slice C.PotluckDbSliceV1,
 		raw *C.PotluckDbBindingsV1,
 		rows *C.PotluckDbRowsHandleV1,
 		cError *C.PotluckDbErrorV1,
 	) C.int32_t {
-		return C.potluckdb_transaction_query_v1(handle, slice, raw, rows, cError)
+		return C.potluckdb_transaction_query_with_engine_v1(handle, slice, raw, selector, rows, cError)
 	})
 }
 
 // Execute writes inside the transaction.
-func (t *Transaction) Execute(sql string, bindings Bindings) (*ExecuteResult, error) {
-	return runExecute(t.state, sql, bindings, func(
+func (t *Transaction) Execute(sql string, args ...any) (*ExecuteResult, error) {
+	return runExecute(t.state, sql, bindingsOf(args), func(
 		handle C.uint64_t,
 		slice C.PotluckDbSliceV1,
 		raw *C.PotluckDbBindingsV1,
@@ -313,8 +381,8 @@ type executeCall func(
 
 func runQuery(
 	state *handleState, sql string, bindings Bindings, call queryCall,
-) ([][]any, error) {
-	var rows [][]any
+) (Rows, error) {
+	var rows Rows
 	err := state.withHandle(func(handle C.uint64_t) error {
 		return withUtf8(sql, func(slice C.PotluckDbSliceV1) error {
 			return buildBindings(bindings, func(raw *C.PotluckDbBindingsV1) error {
@@ -378,21 +446,32 @@ type Connection struct {
 }
 
 // Query reads rows through the connection.
-func (c *Connection) Query(sql string, bindings Bindings) ([][]any, error) {
-	return runQuery(c.state, sql, bindings, func(
+func (c *Connection) Query(sql string, args ...any) (Rows, error) {
+	return c.QueryWith(EngineSQLite, sql, args...)
+}
+
+// QueryWith reads rows through the connection on the given engine.
+func (c *Connection) QueryWith(
+	engine QueryEngine, sql string, args ...any,
+) (Rows, error) {
+	selector, err := queryEngineSelector(engine)
+	if err != nil {
+		return Rows{}, err
+	}
+	return runQuery(c.state, sql, bindingsOf(args), func(
 		handle C.uint64_t,
 		slice C.PotluckDbSliceV1,
 		raw *C.PotluckDbBindingsV1,
 		rows *C.PotluckDbRowsHandleV1,
 		cError *C.PotluckDbErrorV1,
 	) C.int32_t {
-		return C.potluckdb_connection_query_v1(handle, slice, raw, rows, cError)
+		return C.potluckdb_connection_query_with_engine_v1(handle, slice, raw, selector, rows, cError)
 	})
 }
 
 // Execute writes through the connection.
-func (c *Connection) Execute(sql string, bindings Bindings) (*ExecuteResult, error) {
-	return runExecute(c.state, sql, bindings, func(
+func (c *Connection) Execute(sql string, args ...any) (*ExecuteResult, error) {
+	return runExecute(c.state, sql, bindingsOf(args), func(
 		handle C.uint64_t,
 		slice C.PotluckDbSliceV1,
 		raw *C.PotluckDbBindingsV1,
@@ -415,6 +494,12 @@ func (c *Connection) Transaction(body func(*Transaction) error) error {
 func (c *Connection) TransactionWith(
 	mode TransactionMode, body func(*Transaction) error,
 ) error {
+	if body == nil {
+		return nilTransactionBody()
+	}
+	if mode < 0 || uint64(mode) > 1<<32-1 {
+		return invalidArgument("transaction mode must fit uint32", "Use Deferred, Immediate or Exclusive.")
+	}
 	var transactionHandle C.PotluckDbTransactionHandleV1
 	if err := c.state.withHandle(func(handle C.uint64_t) error {
 		cError := newError()
@@ -521,15 +606,26 @@ type Snapshot struct {
 }
 
 // Query reads rows from the pinned revision.
-func (s *Snapshot) Query(sql string, bindings Bindings) ([][]any, error) {
-	return runQuery(s.state, sql, bindings, func(
+func (s *Snapshot) Query(sql string, args ...any) (Rows, error) {
+	return s.QueryWith(EngineSQLite, sql, args...)
+}
+
+// QueryWith reads rows from the pinned revision on the given engine.
+func (s *Snapshot) QueryWith(
+	engine QueryEngine, sql string, args ...any,
+) (Rows, error) {
+	selector, err := queryEngineSelector(engine)
+	if err != nil {
+		return Rows{}, err
+	}
+	return runQuery(s.state, sql, bindingsOf(args), func(
 		handle C.uint64_t,
 		slice C.PotluckDbSliceV1,
 		raw *C.PotluckDbBindingsV1,
 		rows *C.PotluckDbRowsHandleV1,
 		cError *C.PotluckDbErrorV1,
 	) C.int32_t {
-		return C.potluckdb_snapshot_query_v1(handle, slice, raw, rows, cError)
+		return C.potluckdb_snapshot_query_with_engine_v1(handle, slice, raw, selector, rows, cError)
 	})
 }
 
@@ -579,9 +675,17 @@ func Open(path string, remote *Remote, options *OpenOptions) (*Database, error) 
 		return nil, err
 	}
 	open := func(remoteHandle C.uint64_t, retained any) (*Database, error) {
+		var hook *syncHook
+		if selected.OnSync != nil {
+			created, hookErr := newSyncHook(selected.OnSync)
+			if hookErr != nil {
+				return nil, hookErr
+			}
+			hook = created
+		}
 		var handle C.PotluckDbDatabaseHandleV1
 		err := withUtf8(path, func(slice C.PotluckDbSliceV1) error {
-			return withOpenOptions(selected, func(raw *C.PotluckDbOpenOptionsV1) error {
+			return withOpenOptions(selected, hook, func(raw *C.PotluckDbOpenOptionsV1) error {
 				cError := newError()
 				return check(
 					C.potluckdb_open_v1(slice, remoteHandle, raw, &handle, &cError),
@@ -590,16 +694,25 @@ func Open(path string, remote *Remote, options *OpenOptions) (*Database, error) 
 			})
 		})
 		if err != nil {
+			hook.release()
 			return nil, err
 		}
 		state, err := newHandleState(ownerDatabase, handle, true, retained)
 		if err != nil {
+			hook.release()
 			return nil, err
 		}
+		// The runtime keeps the hook's context until the database has
+		// closed, and close returns after the hook's last invocation, so
+		// the context goes back only then.
+		state.afterClose = hook.release
 		return &Database{state: state}, nil
 	}
 	if remote == nil {
 		return open(0, nil)
+	}
+	if remote.state == nil {
+		return nil, unopenedRemote()
 	}
 	var database *Database
 	err = remote.state.withHandle(func(remoteHandle C.uint64_t) error {
@@ -618,6 +731,19 @@ func Open(path string, remote *Remote, options *OpenOptions) (*Database, error) 
 func OpenRevision(
 	path string, revision *Revision, remote *Remote, options *OpenOptions,
 ) (*Snapshot, error) {
+	if revision == nil {
+		return nil, invalidArgument(
+			"revision must not be nil", "Supply a revision and retry.",
+		)
+	}
+	if remote == nil {
+		return nil, invalidArgument(
+			"remote must not be nil", "Supply a remote and retry.",
+		)
+	}
+	if remote.state == nil {
+		return nil, unopenedRemote()
+	}
 	selected, err := options.normalized()
 	if err != nil {
 		return nil, err
@@ -627,7 +753,7 @@ func OpenRevision(
 		raw := writeRevision(revision)
 		var handle C.PotluckDbSnapshotHandleV1
 		openErr := withUtf8(path, func(slice C.PotluckDbSliceV1) error {
-			return withOpenOptions(selected, func(rawOptions *C.PotluckDbOpenOptionsV1) error {
+			return withOpenOptions(selected, nil, func(rawOptions *C.PotluckDbOpenOptionsV1) error {
 				cError := newError()
 				return check(
 					C.potluckdb_open_revision_v1(
@@ -651,10 +777,11 @@ func OpenRevision(
 }
 
 func withOpenOptions(
-	options *OpenOptions, body func(*C.PotluckDbOpenOptionsV1) error,
+	options *OpenOptions, hook *syncHook, body func(*C.PotluckDbOpenOptionsV1) error,
 ) error {
 	var raw C.PotluckDbOpenOptionsV1
 	C.potluckdb_open_options_init_v1(&raw)
+	hook.fill(&raw)
 	raw.local_budget_bytes = C.uint64_t(options.LocalBudgetBytes)
 	raw.minimum_local_budget_bytes = C.uint64_t(options.MinimumLocalBudgetBytes)
 	raw.local_compaction_bytes = C.uint64_t(options.LocalCompactionBytes)
@@ -670,16 +797,38 @@ func withOpenOptions(
 			32,
 		)
 	}
+	// The record passed to C points into Go memory, so its byte slices
+	// must stay pinned until the open call returns.
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
 	if options.ClientID != "" {
 		clientID := []byte(options.ClientID)
 		raw.flags |= 2
+		pinner.Pin(&clientID[0])
 		raw.client_id = C.PotluckDbSliceV1{
 			data:   (*C.uint8_t)(unsafe.Pointer(&clientID[0])),
 			length: C.uint64_t(len(clientID)),
 		}
-		err := body(&raw)
-		runtime.KeepAlive(clientID)
-		return err
+	}
+	if options.LicenseKey != "" {
+		licenseKey := []byte(options.LicenseKey)
+		pinner.Pin(&licenseKey[0])
+		raw.flags |= C.POTLUCKDB_OPEN_LICENSE_KEY_V1
+		raw.license_key = C.PotluckDbSliceV1{
+			data:   (*C.uint8_t)(unsafe.Pointer(&licenseKey[0])),
+			length: C.uint64_t(len(licenseKey)),
+		}
+	}
+	if options.AnalyticalEngine != nil {
+		selection := []byte(*options.AnalyticalEngine)
+		raw.flags |= C.POTLUCKDB_OPEN_ANALYTICAL_ENGINE_V1
+		if len(selection) > 0 {
+			pinner.Pin(&selection[0])
+			raw.analytical_engine = C.PotluckDbSliceV1{
+				data:   (*C.uint8_t)(unsafe.Pointer(&selection[0])),
+				length: C.uint64_t(len(selection)),
+			}
+		}
 	}
 	return body(&raw)
 }
@@ -720,21 +869,32 @@ func fillConnectionOptions(
 }
 
 // Query reads rows through the default connection.
-func (d *Database) Query(sql string, bindings Bindings) ([][]any, error) {
-	return runQuery(d.state, sql, bindings, func(
+func (d *Database) Query(sql string, args ...any) (Rows, error) {
+	return d.QueryWith(EngineSQLite, sql, args...)
+}
+
+// QueryWith reads rows through the default connection on the given engine.
+func (d *Database) QueryWith(
+	engine QueryEngine, sql string, args ...any,
+) (Rows, error) {
+	selector, err := queryEngineSelector(engine)
+	if err != nil {
+		return Rows{}, err
+	}
+	return runQuery(d.state, sql, bindingsOf(args), func(
 		handle C.uint64_t,
 		slice C.PotluckDbSliceV1,
 		raw *C.PotluckDbBindingsV1,
 		rows *C.PotluckDbRowsHandleV1,
 		cError *C.PotluckDbErrorV1,
 	) C.int32_t {
-		return C.potluckdb_database_query_v1(handle, slice, raw, rows, cError)
+		return C.potluckdb_database_query_with_engine_v1(handle, slice, raw, selector, rows, cError)
 	})
 }
 
 // Execute writes through the default connection.
-func (d *Database) Execute(sql string, bindings Bindings) (*ExecuteResult, error) {
-	return runExecute(d.state, sql, bindings, func(
+func (d *Database) Execute(sql string, args ...any) (*ExecuteResult, error) {
+	return runExecute(d.state, sql, bindingsOf(args), func(
 		handle C.uint64_t,
 		slice C.PotluckDbSliceV1,
 		raw *C.PotluckDbBindingsV1,
@@ -757,6 +917,12 @@ func (d *Database) Transaction(body func(*Transaction) error) error {
 func (d *Database) TransactionWith(
 	mode TransactionMode, body func(*Transaction) error,
 ) error {
+	if body == nil {
+		return nilTransactionBody()
+	}
+	if mode < 0 || uint64(mode) > 1<<32-1 {
+		return invalidArgument("transaction mode must fit uint32", "Use Deferred, Immediate or Exclusive.")
+	}
 	var transactionHandle C.PotluckDbTransactionHandleV1
 	if err := d.state.withHandle(func(handle C.uint64_t) error {
 		cError := newError()
@@ -821,43 +987,55 @@ func (d *Database) Sync() (SyncResult, error) {
 			return err
 		}
 		defer C.potluckdb_sync_result_release_v1(&output)
-		switch output.kind {
-		case 1:
-			value := UpToDate{}
-			if output.has_revision != 0 {
-				value.Revision = readRevision(output.revision)
-			}
-			result = value
-		case 2:
-			result = Pushed{Revision: readRevision(output.revision)}
-		case 3:
-			replayed, err := copyStrings(output.replayed)
-			if err != nil {
-				return err
-			}
-			quarantined, err := copyStrings(output.quarantined)
-			if err != nil {
-				return err
-			}
-			result = Pulled{
-				Revision:    readRevision(output.revision),
-				Replayed:    replayed,
-				Quarantined: quarantined,
-			}
-		case 4:
-			value := Conflict{Reason: bufferString(output.reason)}
-			if output.has_revision != 0 {
-				value.RemoteRevision = readRevision(output.revision)
-			}
-			result = value
-		default:
-			return internalFailure(
-				"potluckdb returned an unknown synchronization result",
-			)
+		decoded, err := decodeSyncResult(&output)
+		if err != nil {
+			return err
 		}
+		result = decoded
 		return nil
 	})
 	return result, err
+}
+
+// decodeSyncResult reads one ABI synchronization result; the caller still
+// releases it.
+func decodeSyncResult(output *C.PotluckDbSyncResultV1) (SyncResult, error) {
+	switch output.kind {
+	case 1:
+		value := UpToDate{}
+		if output.has_revision != 0 {
+			value.Revision = readRevision(output.revision)
+		}
+		return value, nil
+	case 2:
+		return Pushed{Revision: readRevision(output.revision)}, nil
+	case 3:
+		replayed, err := copyStrings(output.replayed)
+		if err != nil {
+			return nil, err
+		}
+		quarantined, err := copyStrings(output.quarantined)
+		if err != nil {
+			return nil, err
+		}
+		return Pulled{
+			Revision:    readRevision(output.revision),
+			Replayed:    replayed,
+			Quarantined: quarantined,
+		}, nil
+	case 4:
+		value := Conflict{Reason: bufferString(output.reason)}
+		if output.has_revision != 0 {
+			value.RemoteRevision = readRevision(output.revision)
+		}
+		return value, nil
+	case 5:
+		return Failed{Err: errorValue(&output.error)}, nil
+	default:
+		return nil, internalFailure(
+			"potluckdb returned an unknown synchronization result",
+		)
+	}
 }
 
 // ResolveConflict resolves the current conflict through authenticated rebase.
@@ -906,6 +1084,12 @@ func (d *Database) ResolveConflict() (*ConflictResolution, error) {
 
 // SetSyncPolicy switches synchronization policy and reports the new status.
 func (d *Database) SetSyncPolicy(policy *SyncPolicy) (*DatabaseStatus, error) {
+	if policy == nil {
+		return nil, invalidArgument(
+			"sync policy must not be nil",
+			"Pass AutomaticSync() or ManualSync() and retry.",
+		)
+	}
 	var status *DatabaseStatus
 	err := d.state.withHandle(func(handle C.uint64_t) error {
 		var raw C.PotluckDbSyncPolicyV1
@@ -1009,6 +1193,14 @@ type ReencryptOptions struct {
 func Reencrypt(
 	source, target *Remote, newKey []byte, options *ReencryptOptions,
 ) (*KeyRotationReport, error) {
+	if source == nil || target == nil {
+		return nil, invalidArgument(
+			"source and target must not be nil", "Supply both remotes and retry.",
+		)
+	}
+	if source.state == nil || target.state == nil {
+		return nil, unopenedRemote()
+	}
 	if len(newKey) != 32 {
 		return nil, invalidArgument(
 			"encryption key must contain exactly 32 bytes",

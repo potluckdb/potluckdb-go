@@ -31,6 +31,10 @@ extern "C" {
 #define POTLUCKDB_RUNTIME_ERROR_IDENTITY_COLLISION INT32_C(19)
 #define POTLUCKDB_RUNTIME_ERROR_SQLITE INT32_C(20)
 #define POTLUCKDB_RUNTIME_ERROR_EXECUTION_ENGINE INT32_C(21)
+#define POTLUCKDB_RUNTIME_ERROR_LICENSE_REQUIRED INT32_C(22)
+#define POTLUCKDB_RUNTIME_ERROR_STORAGE_UNSUPPORTED INT32_C(23)
+#define POTLUCKDB_RUNTIME_ERROR_BUCKET_NOT_FOUND INT32_C(24)
+#define POTLUCKDB_RUNTIME_ERROR_INVALID_ARGUMENT INT32_C(25)
 
 #define POTLUCKDB_RUNTIME_DUCKDB_VALUE_BOOLEAN_V1 UINT8_C(1)
 #define POTLUCKDB_RUNTIME_DUCKDB_VALUE_SIGNED_INTEGER_V1 UINT8_C(2)
@@ -39,10 +43,18 @@ extern "C" {
 #define POTLUCKDB_RUNTIME_DUCKDB_VALUE_TEXT_V1 UINT8_C(5)
 #define POTLUCKDB_RUNTIME_DUCKDB_VALUE_BLOB_V1 UINT8_C(6)
 
+/* Set in PotluckDbRuntimeDuckDbOptionsV1.flags to refuse anything on the
+   handle that is not a read. A handle kept for the life of a session --
+   which is what an SDK's query uses -- would otherwise carry a SET or a
+   CREATE forward into every later query on it. */
+#define POTLUCKDB_RUNTIME_DUCKDB_READ_ONLY_V1 UINT32_C(1)
+
 #define POTLUCKDB_RUNTIME_PROFILE_ROLLBACK_V1 UINT32_C(1)
 #define POTLUCKDB_RUNTIME_PROFILE_WAL_EXCLUSIVE_V1 UINT32_C(2)
 
 #define POTLUCKDB_RUNTIME_OPEN_ENCRYPTION_KEY UINT32_C(1)
+#define POTLUCKDB_RUNTIME_AUTHORIZE_TRIAL_ANCHOR_V1 UINT32_C(1)
+#define POTLUCKDB_RUNTIME_AUTHORIZE_CREATING_V1 UINT32_C(2)
 #define POTLUCKDB_RUNTIME_SPARSE_EXACT_REVISION_V1 UINT32_C(1)
 #define POTLUCKDB_RUNTIME_PREFETCH_FIXED_V1 UINT32_C(1)
 #define POTLUCKDB_RUNTIME_PREFETCH_ADAPTIVE_V1 UINT32_C(2)
@@ -96,6 +108,13 @@ extern "C" {
 #define POTLUCKDB_RUNTIME_AUTO_SYNC_CONFLICT_V1 UINT32_C(7)
 #define POTLUCKDB_RUNTIME_AUTO_SYNC_FAILED_V1 UINT32_C(8)
 #define POTLUCKDB_RUNTIME_AUTO_SYNC_CLOSED_V1 UINT32_C(9)
+#define POTLUCKDB_RUNTIME_AUTO_SYNC_OUTCOME_NONE_V1 UINT32_C(0)
+#define POTLUCKDB_RUNTIME_AUTO_SYNC_OUTCOME_UP_TO_DATE_V1 UINT32_C(1)
+#define POTLUCKDB_RUNTIME_AUTO_SYNC_OUTCOME_PUSHED_V1 UINT32_C(2)
+#define POTLUCKDB_RUNTIME_AUTO_SYNC_OUTCOME_PULLED_V1 UINT32_C(3)
+#define POTLUCKDB_RUNTIME_AUTO_SYNC_OUTCOME_CONFLICT_V1 UINT32_C(4)
+#define POTLUCKDB_RUNTIME_AUTO_SYNC_OUTCOME_FAILED_V1 UINT32_C(5)
+#define POTLUCKDB_RUNTIME_AUTO_SYNC_OUTCOME_DEFERRED_V1 UINT32_C(6)
 
 #define POTLUCKDB_RUNTIME_TRANSACTION_DEFERRED_V1 UINT32_C(1)
 #define POTLUCKDB_RUNTIME_TRANSACTION_IMMEDIATE_V1 UINT32_C(2)
@@ -153,6 +172,22 @@ typedef struct PotluckDbRuntimeOpenOptionsV1 {
     uint32_t flags;
     uint8_t encryption_key[32];
 } PotluckDbRuntimeOpenOptionsV1;
+
+/*
+ * `license_key` is the application's license_key open option, empty when
+ * it gave none. POTLUCKDB_RUNTIME_AUTHORIZE_CREATING_V1 says the caller is
+ * about to create a database, which alone is refused after the trial. With
+ * POTLUCKDB_RUNTIME_AUTHORIZE_TRIAL_ANCHOR_V1 the caller keeps the trial
+ * anchor itself and passes it in `trial_anchor_unix_seconds`.
+ */
+typedef struct PotluckDbRuntimeAuthorizeOptionsV1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t flags;
+    uint32_t reserved;
+    PotluckDbRuntimeSliceV1 license_key;
+    uint64_t trial_anchor_unix_seconds;
+} PotluckDbRuntimeAuthorizeOptionsV1;
 
 typedef struct PotluckDbRuntimeAttachmentOptionsV1 {
     uint32_t struct_size;
@@ -269,6 +304,12 @@ typedef struct PotluckDbRuntimeAutoSyncStatusV1 {
     uint8_t conflict_remote_revision[32];
     PotluckDbRuntimeBufferV1 last_error;
     PotluckDbRuntimeBufferV1 conflict_reason;
+    uint32_t last_outcome;
+    uint32_t has_last_revision;
+    uint8_t last_revision[32];
+    uint64_t last_replayed_count;
+    uint64_t last_quarantined_count;
+    PotluckDbRuntimeBufferV1 last_pull_details;
 } PotluckDbRuntimeAutoSyncStatusV1;
 
 typedef struct PotluckDbRuntimeBranchStatusV1 {
@@ -504,12 +545,15 @@ typedef struct PotluckDbRuntimeDuckDbQueryMetricsV1 {
     uint64_t maximum_callbacks_in_flight;
 } PotluckDbRuntimeDuckDbQueryMetricsV1;
 
-/* details is one big-endian SVQ1 value in this order: already-published string list,
- * replayed string list, quarantine list, and pending string list. Every list starts
- * with a uint64 count; every UTF-8 string or opaque byte value starts with a uint64
- * length. A quarantine is sequence uint64, has-error-code byte, error-code int32,
- * error name, error message, recipe transaction ID, statement-count uint64, then
- * SQL and canonical binding bytes for each statement. Release details once. */
+/* details begins with SVQ1 or SVQ2 and contains, in big-endian order:
+ * already-published string list, replayed string list, quarantine list, and
+ * pending string list. Every list starts with a uint64 count; every UTF-8
+ * string or opaque byte value starts with a uint64 length. A quarantine is
+ * sequence uint64, has-error-code byte, error-code int32, error name, error
+ * message, recipe transaction ID, statement-count uint64, then SQL and
+ * canonical binding bytes for each statement. SVQ2 additionally appends a
+ * sized canonical single-recipe array after each quarantine statement list.
+ * Legacy-only results retain SVQ1. Release details once. */
 
 typedef struct PotluckDbRuntimeLocalOperationV1 {
     uint32_t kind;
@@ -560,14 +604,14 @@ typedef int32_t (*PotluckDbRuntimeEmitBytesV1)(void *context, PotluckDbRuntimeSl
 typedef int32_t (*PotluckDbRuntimeLocalReadV1)(
     void *context,
     PotluckDbRuntimeSliceV1 name,
-    PotluckDbRuntimeEmitBytesV1 emit,
+    PotluckDbRuntimeEmitBytesV1 emit_bytes,
     void *emit_context,
     PotluckDbRuntimeHostErrorV1 *error
 );
 typedef int32_t (*PotluckDbRuntimeLocalListV1)(
     void *context,
     PotluckDbRuntimeSliceV1 prefix,
-    PotluckDbRuntimeEmitBytesV1 emit,
+    PotluckDbRuntimeEmitBytesV1 emit_bytes,
     void *emit_context,
     PotluckDbRuntimeHostErrorV1 *error
 );
@@ -604,7 +648,7 @@ typedef struct PotluckDbRuntimeLocalAdapterV1 {
 typedef int32_t (*PotluckDbRuntimeBucketGetV1)(
     void *context,
     PotluckDbRuntimeSliceV1 key,
-    PotluckDbRuntimeEmitBytesV1 emit,
+    PotluckDbRuntimeEmitBytesV1 emit_bytes,
     void *emit_context,
     PotluckDbRuntimeHostErrorV1 *error
 );
@@ -623,7 +667,7 @@ typedef int32_t (*PotluckDbRuntimeBucketExistsV1)(
 typedef int32_t (*PotluckDbRuntimeBucketListV1)(
     void *context,
     PotluckDbRuntimeSliceV1 prefix,
-    PotluckDbRuntimeEmitBytesV1 emit,
+    PotluckDbRuntimeEmitBytesV1 emit_bytes,
     void *emit_context,
     PotluckDbRuntimeHostErrorV1 *error
 );
@@ -634,7 +678,7 @@ typedef int32_t (*PotluckDbRuntimeBucketDeleteV1)(
 );
 typedef int32_t (*PotluckDbRuntimeBucketCellGetV1)(
     void *context,
-    PotluckDbRuntimeEmitBytesV1 emit,
+    PotluckDbRuntimeEmitBytesV1 emit_bytes,
     void *emit_context,
     PotluckDbRuntimeHostErrorV1 *error
 );
@@ -688,6 +732,7 @@ typedef struct PotluckDbRuntimeBucketAdapterV1 {
 
 uint32_t potluckdb_runtime_abi_version_v1(void);
 uint32_t potluckdb_runtime_open_options_size_v1(void);
+uint32_t potluckdb_runtime_authorize_options_size_v1(void);
 uint32_t potluckdb_runtime_attachment_options_size_v1(void);
 uint32_t potluckdb_runtime_sparse_options_size_v1(void);
 uint32_t potluckdb_runtime_prefetch_options_size_v1(void);
@@ -721,6 +766,7 @@ uint32_t potluckdb_runtime_duckdb_options_size_v1(void);
 uint32_t potluckdb_runtime_duckdb_query_metrics_size_v1(void);
 
 void potluckdb_runtime_open_options_init_v1(PotluckDbRuntimeOpenOptionsV1 *options);
+void potluckdb_runtime_authorize_options_init_v1(PotluckDbRuntimeAuthorizeOptionsV1 *options);
 void potluckdb_runtime_attachment_options_init_v1(PotluckDbRuntimeAttachmentOptionsV1 *options);
 void potluckdb_runtime_sparse_options_init_v1(PotluckDbRuntimeSparseOptionsV1 *options);
 void potluckdb_runtime_prefetch_options_init_v1(PotluckDbRuntimePrefetchOptionsV1 *options);
@@ -752,6 +798,10 @@ void potluckdb_runtime_statement_call_init_v1(PotluckDbRuntimeStatementCallV1 *c
 void potluckdb_runtime_duckdb_options_init_v1(PotluckDbRuntimeDuckDbOptionsV1 *options);
 void potluckdb_runtime_duckdb_query_metrics_init_v1(PotluckDbRuntimeDuckDbQueryMetricsV1 *metrics);
 
+int32_t potluckdb_runtime_authorize_v1(
+    const PotluckDbRuntimeAuthorizeOptionsV1 *options,
+    PotluckDbRuntimeErrorV1 *out_error
+);
 int32_t potluckdb_runtime_session_open_v1(
     const PotluckDbRuntimeOpenOptionsV1 *options,
     PotluckDbRuntimeHandleV1 *out_handle,
@@ -871,6 +921,18 @@ int32_t potluckdb_runtime_duckdb_query_v1(
     uint32_t out_metrics_size,
     PotluckDbRuntimeErrorV1 *out_error
 );
+/* `bindings` is empty or one SVB1 binding set, the same encoding
+   potluckdb_runtime_session_execute_v1 takes. DuckDB's parser rejects
+   :name and @name, so $name is the only named form both engines read. */
+int32_t potluckdb_runtime_duckdb_query_bound_v1(
+    PotluckDbRuntimeHandleV1 handle,
+    PotluckDbRuntimeSliceV1 sql,
+    PotluckDbRuntimeSliceV1 bindings,
+    PotluckDbRuntimeBufferV1 *out_rows,
+    PotluckDbRuntimeDuckDbQueryMetricsV1 *out_metrics,
+    uint32_t out_metrics_size,
+    PotluckDbRuntimeErrorV1 *out_error
+);
 int32_t potluckdb_runtime_duckdb_library_version_v1(
     PotluckDbRuntimeHandleV1 handle,
     PotluckDbRuntimeBufferV1 *out_version,
@@ -926,7 +988,7 @@ int32_t potluckdb_runtime_exchange_execute_v1(
     uint32_t out_outcome_size,
     PotluckDbRuntimeErrorV1 *out_error
 );
-/* A null upload-options pointer selects a fresh native fixed policy with limit 16. */
+/* A null upload-options pointer selects the exchange's configured writer. */
 int32_t potluckdb_runtime_exchange_execute_with_uploads_v1(
     PotluckDbRuntimeHandleV1 exchange_handle,
     uint64_t prepared_token,
@@ -964,6 +1026,7 @@ int32_t potluckdb_runtime_sync_operation_exchange_v1(
     uint32_t out_outcome_size,
     PotluckDbRuntimeErrorV1 *out_error
 );
+/* A null upload-options pointer selects the exchange's configured writer. */
 int32_t potluckdb_runtime_sync_operation_exchange_with_uploads_v1(
     PotluckDbRuntimeHandleV1 operation_handle,
     PotluckDbRuntimeHandleV1 exchange_handle,
@@ -1054,7 +1117,20 @@ int32_t potluckdb_runtime_exchange_bucket_counters_v1(
     uint32_t out_counters_size,
     PotluckDbRuntimeErrorV1 *out_error
 );
-/* bindings is empty or one SVB1 value; out_rows owns one SVR1 value. */
+/* bindings is empty or one SVB1 value; out_rows owns one SVR2 value. */
+/* Authoritative sqlite3_get_autocommit observation on the connection owner lane.
+   out_active is 0 in autocommit, 1 while a transaction is open. */
+int32_t potluckdb_runtime_session_transaction_state_v1(
+    uint64_t handle, uint32_t *out_active, PotluckDbRuntimeErrorV1 *out_error);
+int32_t potluckdb_runtime_connection_transaction_state_v1(
+    uint64_t handle, uint32_t *out_active, PotluckDbRuntimeErrorV1 *out_error);
+
+/* Apply owned initialization once; replacements restore it before an R12 initializer. */
+int32_t potluckdb_runtime_session_initialize_busy_timeout_v1(
+    PotluckDbRuntimeHandleV1 handle,
+    uint64_t timeout_ms,
+    PotluckDbRuntimeErrorV1 *out_error
+);
 int32_t potluckdb_runtime_session_execute_v1(
     PotluckDbRuntimeHandleV1 handle,
     PotluckDbRuntimeSliceV1 sql,
@@ -1062,11 +1138,54 @@ int32_t potluckdb_runtime_session_execute_v1(
     PotluckDbRuntimeBufferV1 *out_rows,
     PotluckDbRuntimeErrorV1 *out_error
 );
+int32_t potluckdb_runtime_session_execute_mutation_v1(
+    PotluckDbRuntimeHandleV1 handle,
+    PotluckDbRuntimeSliceV1 sql,
+    PotluckDbRuntimeSliceV1 bindings,
+    PotluckDbRuntimeBufferV1 *out_rows,
+    int64_t *out_rows_affected,
+    uint32_t *out_last_insert_present,
+    int64_t *out_last_insert,
+    PotluckDbRuntimeErrorV1 *out_error
+);
 /* Parses exactly one statement without running it. */
 int32_t potluckdb_runtime_session_statement_readonly_v1(
     PotluckDbRuntimeHandleV1 handle,
     PotluckDbRuntimeSliceV1 sql,
     uint32_t *out_readonly,
+    PotluckDbRuntimeErrorV1 *out_error
+);
+/* Outcome of the most recent execute on this owner: 1 with the rowid when that direct INSERT or REPLACE inserted a row, else 0. */
+int32_t potluckdb_runtime_session_last_insert_v1(
+    PotluckDbRuntimeHandleV1 handle,
+    uint32_t *out_present,
+    int64_t *out_rowid,
+    PotluckDbRuntimeErrorV1 *out_error
+);
+/* Observes one PRAGMA without applying it: 1 with the tokenized name and value flag, else 0. */
+int32_t potluckdb_runtime_session_statement_pragma_v1(
+    PotluckDbRuntimeHandleV1 handle,
+    PotluckDbRuntimeSliceV1 sql,
+    uint32_t *out_observed,
+    PotluckDbRuntimeBufferV1 *out_name,
+    uint32_t *out_has_value,
+    PotluckDbRuntimeErrorV1 *out_error
+);
+/* Prepares and finalizes one statement without stepping or validating bindings. */
+int32_t potluckdb_runtime_session_statement_info_v1(
+    PotluckDbRuntimeHandleV1 handle,
+    PotluckDbRuntimeSliceV1 sql,
+    uint32_t *out_readonly,
+    uint32_t *out_parameter_count,
+    PotluckDbRuntimeErrorV1 *out_error
+);
+/* Empty SVR2 columns describe the one prepared statement; no step occurs. */
+int32_t potluckdb_runtime_session_statement_metadata_v1(
+    PotluckDbRuntimeHandleV1 handle,
+    PotluckDbRuntimeSliceV1 sql,
+    uint32_t *out_readonly,
+    uint32_t *out_parameter_count,
+    PotluckDbRuntimeBufferV1 *out_columns,
     PotluckDbRuntimeErrorV1 *out_error
 );
 /* Each call contains exactly one statement and empty or canonical SVB1 bindings. */
@@ -1109,6 +1228,12 @@ int32_t potluckdb_runtime_session_status_v1(
     uint32_t out_status_size,
     PotluckDbRuntimeErrorV1 *out_error
 );
+/* Same-value registration is idempotent; a different owned timeout is refused. */
+int32_t potluckdb_runtime_connection_initialize_busy_timeout_v1(
+    PotluckDbRuntimeHandleV1 handle,
+    uint64_t timeout_ms,
+    PotluckDbRuntimeErrorV1 *out_error
+);
 int32_t potluckdb_runtime_connection_execute_v1(
     PotluckDbRuntimeHandleV1 handle,
     PotluckDbRuntimeSliceV1 sql,
@@ -1116,11 +1241,54 @@ int32_t potluckdb_runtime_connection_execute_v1(
     PotluckDbRuntimeBufferV1 *out_rows,
     PotluckDbRuntimeErrorV1 *out_error
 );
+int32_t potluckdb_runtime_connection_execute_mutation_v1(
+    PotluckDbRuntimeHandleV1 handle,
+    PotluckDbRuntimeSliceV1 sql,
+    PotluckDbRuntimeSliceV1 bindings,
+    PotluckDbRuntimeBufferV1 *out_rows,
+    int64_t *out_rows_affected,
+    uint32_t *out_last_insert_present,
+    int64_t *out_last_insert,
+    PotluckDbRuntimeErrorV1 *out_error
+);
 /* Parses exactly one statement without running it. */
 int32_t potluckdb_runtime_connection_statement_readonly_v1(
     PotluckDbRuntimeHandleV1 handle,
     PotluckDbRuntimeSliceV1 sql,
     uint32_t *out_readonly,
+    PotluckDbRuntimeErrorV1 *out_error
+);
+/* Outcome of the most recent execute on this owner: 1 with the rowid when that direct INSERT or REPLACE inserted a row, else 0. */
+int32_t potluckdb_runtime_connection_last_insert_v1(
+    PotluckDbRuntimeHandleV1 handle,
+    uint32_t *out_present,
+    int64_t *out_rowid,
+    PotluckDbRuntimeErrorV1 *out_error
+);
+/* Observes one PRAGMA without applying it: 1 with the tokenized name and value flag, else 0. */
+int32_t potluckdb_runtime_connection_statement_pragma_v1(
+    PotluckDbRuntimeHandleV1 handle,
+    PotluckDbRuntimeSliceV1 sql,
+    uint32_t *out_observed,
+    PotluckDbRuntimeBufferV1 *out_name,
+    uint32_t *out_has_value,
+    PotluckDbRuntimeErrorV1 *out_error
+);
+/* Prepares and finalizes one statement without stepping or validating bindings. */
+int32_t potluckdb_runtime_connection_statement_info_v1(
+    PotluckDbRuntimeHandleV1 handle,
+    PotluckDbRuntimeSliceV1 sql,
+    uint32_t *out_readonly,
+    uint32_t *out_parameter_count,
+    PotluckDbRuntimeErrorV1 *out_error
+);
+/* Empty SVR2 columns describe the one prepared statement; no step occurs. */
+int32_t potluckdb_runtime_connection_statement_metadata_v1(
+    PotluckDbRuntimeHandleV1 handle,
+    PotluckDbRuntimeSliceV1 sql,
+    uint32_t *out_readonly,
+    uint32_t *out_parameter_count,
+    PotluckDbRuntimeBufferV1 *out_columns,
     PotluckDbRuntimeErrorV1 *out_error
 );
 int32_t potluckdb_runtime_connection_transact_v1(

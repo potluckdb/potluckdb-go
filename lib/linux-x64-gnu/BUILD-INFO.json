@@ -1,0 +1,15 @@
+{
+  "commit": "",
+  "files": {
+    "LICENSE.txt": "04199a38cdeb2c7779d28073a01361f08a552aac524d8c04599306e6f56c69f4",
+    "THIRD_PARTY_NOTICES.txt": "b4164a4ba30fed664360b635a88cf7b04d207dc4b15458630b3c8c6b0c9560f9",
+    "include/potluckdb.h": "373f420f27c25388593f8406228b50293d207dddc3d3fd5fcfc8585f0baa3771",
+    "include/sqlite3.h": "d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c",
+    "include/sqlite3ext.h": "48963abfefb41ac329ef9d706acb5eadba952a99a748285c9ded6b5e0942721b",
+    "lib/libsqlite3.so.0": "5c1ef99676f30f3330f038bba9b1517dab28d0f53bfd201607da2d4488868afd",
+    "lib/static/libsqlite3.a": "dd939be96ecc0031e29ce7cae565a1586e6238a7e0d8bbcac2e6fa32d3dc1e65"
+  },
+  "potluckdb_version": "0.8.0-dev.1",
+  "sqlite_version": "3.54.1",
+  "target": "linux-x64-gnu"
+}

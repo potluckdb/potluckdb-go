@@ -6,13 +6,13 @@
 // not this one.
 //
 // libsqlite3.a is lib/static/libsqlite3.a of the core archive
-// potluckdb-sqlite-0.8.0-dev.1-macos-arm64.tar.gz (SHA-256 88caac222d84863972a15b04f60ad7d15d1c3b9ba1ac061a20ec150bb43f84ef);
+// potluckdb-sqlite-0.8.0-dev.2-macos-arm64.tar.gz (SHA-256 5513914a795ed42305733fc92e0d0262822e8c6d4700773045ae570968474ff0);
 // BUILD-INFO.json is the archive's own. The library is under the
 // PotluckDB binary licence (LICENSE.txt); the SQLite source code compiled
 // into it is in the public domain (THIRD_PARTY_NOTICES.txt).
 package lib
 
-// IsVersion0_8_0_dev_1 is used by the driver of the same PotluckDB
+// IsVersion0_8_0_dev_2 is used by the driver of the same PotluckDB
 // version, so that a driver and a library of different versions never
 // build together.
-const IsVersion0_8_0_dev_1 = true
+const IsVersion0_8_0_dev_2 = true

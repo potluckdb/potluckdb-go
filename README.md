@@ -1,6 +1,6 @@
 # PotluckDB for Go
 
-This repository holds the Go modules of PotluckDB 0.8.0-dev.1 (SQLite
+This repository holds the Go modules of PotluckDB 0.8.0-dev.2 (SQLite
 3.54.1). PotluckDB's release writes it; it is never edited by hand. Its
 source is the `go/` folder of
 [potluckdb/potluckdb](https://github.com/potluckdb/potluckdb/tree/main/go).
@@ -19,14 +19,14 @@ source is the `go/` folder of
 | `github.com/potluckdb/potluckdb-go/lib/macos-arm64` | The SQLite library for macOS 11 or later, Apple silicon |
 | `github.com/potluckdb/potluckdb-go/lib/macos-x64` | The SQLite library for macOS 11 or later, Intel |
 
-Each module is tagged `<folder>/v0.8.0-dev.1`, for example
-`sqlite3/v0.8.0-dev.1`. The driver needs every library module of its own
+Each module is tagged `<folder>/v0.8.0-dev.2`, for example
+`sqlite3/v0.8.0-dev.2`. The driver needs every library module of its own
 version; Go downloads only the one for the platform it builds for.
 
 Not in this version:
 
-- windows-arm64: potluckdb-sqlite-0.8.0-dev.1-windows-arm64.zip has no static library that cgo can link (lib/static/libsqlite3.a)
-- windows-x64: potluckdb-sqlite-0.8.0-dev.1-windows-x64.zip has no static library that cgo can link (lib/static/libsqlite3.a)
+- windows-arm64: potluckdb-sqlite-0.8.0-dev.2-windows-arm64.zip has no static library that cgo can link (lib/static/libsqlite3.a)
+- windows-x64: potluckdb-sqlite-0.8.0-dev.2-windows-x64.zip has no static library that cgo can link (lib/static/libsqlite3.a)
 
 ## Licences
 

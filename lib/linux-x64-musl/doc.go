@@ -6,13 +6,13 @@
 // not this one.
 //
 // libsqlite3.a is lib/static/libsqlite3.a of the core archive
-// potluckdb-sqlite-0.8.0-dev.1-linux-x64-musl.tar.gz (SHA-256 eb772396716f38e24a530476cb787d524dd2beaa3ef356ecbf9375cee0fa55e0);
+// potluckdb-sqlite-0.8.0-dev.2-linux-x64-musl.tar.gz (SHA-256 571acf6ec3891ce78cc964fcf22bfc9f429b192c6e3c1670af1ad22c8bcf4f12);
 // BUILD-INFO.json is the archive's own. The library is under the
 // PotluckDB binary licence (LICENSE.txt); the SQLite source code compiled
 // into it is in the public domain (THIRD_PARTY_NOTICES.txt).
 package lib
 
-// IsVersion0_8_0_dev_1 is used by the driver of the same PotluckDB
+// IsVersion0_8_0_dev_2 is used by the driver of the same PotluckDB
 // version, so that a driver and a library of different versions never
 // build together.
-const IsVersion0_8_0_dev_1 = true
+const IsVersion0_8_0_dev_2 = true

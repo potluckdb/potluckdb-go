@@ -6,10 +6,10 @@
     "include/potluckdb.h": "373f420f27c25388593f8406228b50293d207dddc3d3fd5fcfc8585f0baa3771",
     "include/sqlite3.h": "d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c",
     "include/sqlite3ext.h": "48963abfefb41ac329ef9d706acb5eadba952a99a748285c9ded6b5e0942721b",
-    "lib/libsqlite3.so.0": "d15e725012566c15d1eb966e2e35b4f7378762d9867758c27fc72172265e7895",
-    "lib/static/libsqlite3.a": "0859ac10e818ab583b868271012ab03bf3bf12950b0f62024a357ea69e879bd2"
+    "lib/libsqlite3.so.0": "0edb54f2e577d848f456def9276fa4ce614ec928a8358befd10a22866f7605be",
+    "lib/static/libsqlite3.a": "a6a91c2b6c6d6208cb01ad8ef874d3a0e1dcb45c4643bd748ca03b6b6e5fbfe1"
   },
-  "potluckdb_version": "0.8.0-dev.1",
+  "potluckdb_version": "0.8.0-dev.2",
   "sqlite_version": "3.54.1",
   "target": "linux-arm64-musl"
 }

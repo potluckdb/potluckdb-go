@@ -9,5 +9,5 @@ import lib "github.com/potluckdb/potluckdb-go/lib/linux-arm64-gnu"
 // The library module must come from the same PotluckDB release as this
 // driver. If this does not compile, go.mod asks for another version of
 // github.com/potluckdb/potluckdb-go/lib/linux-arm64-gnu: remove that requirement, or run
-// go get github.com/potluckdb/potluckdb-go/sqlite3@v0.8.0-dev.1
-const _ = lib.IsVersion0_8_0_dev_1
+// go get github.com/potluckdb/potluckdb-go/sqlite3@v0.8.0-dev.2
+const _ = lib.IsVersion0_8_0_dev_2
